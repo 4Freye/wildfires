@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 import networkx as nx
 
 
-
 # pre-fire dates
 kincaid_pre_date = '20190923'
 czu_pre_date = '20200716'
@@ -51,6 +50,26 @@ def process_pre_fire_data(df, fire_start_date):
     pre_fire_merged = pre_fire_merged.merge(df.drop_duplicates(['geoid_d'])[['geoid_d','lat_d','lng_d']], how='left', on='geoid_d')
 
     return pre_fire_merged
+
+def process_during_fire_data(df, fire_start_date, fire_contained_date):
+    fire_start_date = datetime.strptime(fire_start_date, '%Y%m%d')
+    fire_pre_date = fire_start_date - timedelta(days=30)  # get 30 days prior to the fire_start_date
+    fire_start_date = fire_start_date.strftime('%Y%m%d')
+    fire_pre_date = fire_pre_date.strftime('%Y%m%d')
+
+    during_fire_df = df.query('date >= @fire_start_date and date < @fire_contained_date')
+    n_days = (during_fire_df['date'].max() - during_fire_df['date'].min()).days
+    during_fire_grouped = during_fire_df.groupby(['geoid_o', 'geoid_d']).agg({'visitor_flows':'sum', 'pop_flows':'sum'})
+    
+    # normalize by the number of days
+    during_fire_grouped = during_fire_grouped.multiply(1/n_days)
+    during_fire_grouped.reset_index(inplace=True)
+    
+    # merge long lat
+    during_fire_merged = during_fire_grouped.merge(df.drop_duplicates(['geoid_o'])[['geoid_o','lat_o','lng_o']], how='left', on='geoid_o')
+    during_fire_merged = during_fire_merged.merge(df.drop_duplicates(['geoid_d'])[['geoid_d','lat_d','lng_d']], how='left', on='geoid_d')
+
+    return during_fire_merged
 
 
 def plot_density_map(wildfire_df, fire_name, coords):
@@ -106,13 +125,18 @@ def get_eigenvector_centrality(pre_fire_df, center_coords, affected_dist):
     center = center_coords
 
     # Calculate the distance between each observation and the center point
-    distances = pre_fire_df.apply(
+    distances_o = pre_fire_df.apply(
         lambda row: geodesic(center, (row['lat_o'], row['lng_o'])).kilometers,
         axis=1
     )
 
+    distances_d = pre_fire_df.apply(
+        lambda row: geodesic(center, (row['lat_d'], row['lng_d'])).kilometers,
+        axis=1
+    )
+
     # Filter the DataFrame for observations outside the maximum distance
-    filtered_data = pre_fire_df[distances <= affected_dist/2].reset_index(drop=True)
+    filtered_data = pre_fire_df[(distances_o <= affected_dist) & (distances_d <= affected_dist)].reset_index(drop=True)
     filtered_data['pop_flows'] = pd.to_numeric(filtered_data['pop_flows'], errors='coerce')
 
     # Eigenvector centralities for counties
