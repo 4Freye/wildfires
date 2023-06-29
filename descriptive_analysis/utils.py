@@ -1,14 +1,22 @@
 from datetime import datetime, timedelta
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
 import plotly.express as px
+import plotly.graph_objects as go
 from geopy.extra.rate_limiter import RateLimiter
 from geopy.geocoders import Nominatim
-import json
 from geopy.point import Point
 from geopy.distance import geodesic
 import igraph as ig
-import pandas as pd
-import plotly.graph_objects as go
 import networkx as nx
+from shapely.geometry import Point, LineString, shape
+from shapely.geometry import MultiPoint, MultiPolygon
+from haversine import haversine, Unit
+import pyarrow
+from utils import *
+import json
+
 
 
 # pre-fire dates
@@ -237,3 +245,102 @@ def plot_centrality(merged_df, fire_name):
 
     # Show the figure
     fig.show()
+
+
+def mark_blocked_paths(df_fire, df_travel, save_path, buffer_radius_km):
+
+    # GeoDataFrame for travel data
+    geometry_travel = [LineString([(row['lng_o'], row['lat_o']), (row['lng_d'], row['lat_d'])]) for idx, row in df_travel.iterrows()]
+    gdf_travel = gpd.GeoDataFrame(df_travel, geometry=geometry_travel)
+
+    # Set the CRS for the GeoDataFrames
+    gdf_travel.set_crs("EPSG:4326", inplace=True)
+
+    # For each unique date in the fire data, create a Polygon (buffered Convex Hull) that encompasses all points for that date
+    df_fire['acq_date'] = pd.to_datetime(df_fire['acq_date'])
+    unique_dates = df_fire['acq_date'].dt.date.unique()
+    fire_polygons = []
+    for date in unique_dates:
+        df_date = df_fire[df_fire['acq_date'].dt.date == date]
+        fire_points = MultiPoint([xy for xy in zip(df_date['longitude'], df_date['latitude'])])
+        fire_polygon = gpd.GeoSeries(fire_points.convex_hull, crs="EPSG:4326")  # Create GeoSeries
+
+        # Buffer the polygon
+        # First, project the GeoDataFrame to a coordinate system where the unit is meters (e.g., UTM)
+        fire_polygon_utm = fire_polygon.to_crs('EPSG:32610')  # Replace 'EPSG:32610' with the correct UTM zone if needed
+        buffered_fire_polygon_utm = fire_polygon_utm.buffer(buffer_radius_km * 1000)  # Buffer the polygon in the projected coordinate system
+
+        # Then, project the GeoDataFrame back to WGS84 (latitude/longitude coordinates)
+        buffered_fire_polygon = buffered_fire_polygon_utm.to_crs('EPSG:4326')
+
+        fire_polygons.append(buffered_fire_polygon.iloc[0])
+
+    # GeoDataFrame for fire data
+    gdf_fire = gpd.GeoDataFrame(df_fire['acq_date'].drop_duplicates().reset_index(drop=True), geometry=fire_polygons)
+    gdf_fire.set_crs("EPSG:4326", inplace=True)
+
+    # Save fire polygons as GeoJSON
+    gdf_fire.to_file(save_path, driver="GeoJSON")
+
+    join_result = gpd.sjoin(gdf_travel, gdf_fire, how="left", op="intersects")
+
+    blocked_paths = join_result[join_result.index_right.notnull()].index.unique()
+
+    df_travel['blocked'] = False
+    for path in blocked_paths:
+        df_travel.loc[path, 'blocked'] = True
+
+    # Create a DataFrame that pairs counties
+    df_pairs = df_travel[['geoid_o', 'geoid_d']].drop_duplicates().sort_values(by=['geoid_o', 'geoid_d']).reset_index(drop=True)
+    df_pairs['blocked'] = False  # Initially mark all pairs as not blocked
+
+    # For each blocked path, mark the corresponding pair of counties as blocked
+    for path in blocked_paths:
+        geoid_o = df_travel.loc[path, 'geoid_o']
+        geoid_d = df_travel.loc[path, 'geoid_d']
+        df_pairs.loc[(df_pairs['geoid_o'] == geoid_o) & (df_pairs['geoid_d'] == geoid_d), 'blocked'] = True
+
+    return df_pairs
+
+def plot_data(df_fire, df_travel, df_pairs, fire_name):
+    # Convert to GeoDataFrames
+    geometry_fire = [Point(xy) for xy in zip(df_fire.longitude, df_fire.latitude)]
+    gdf_fire = gpd.GeoDataFrame(df_fire, geometry=geometry_fire)
+
+    geometry_travel = [LineString([(row['lng_o'], row['lat_o']), (row['lng_d'], row['lat_d'])]) for idx, row in df_travel.iterrows()]
+    gdf_travel = gpd.GeoDataFrame(df_travel, geometry=geometry_travel)
+    
+    # Merge df_pairs with df_travel to bring back the geometry of the travel paths
+    df_pairs_with_geometry = pd.merge(df_pairs, df_travel[['geoid_o', 'geoid_d', 'geometry']], on=['geoid_o', 'geoid_d'], how='left')
+    
+    df_pairs_blocked = df_pairs_with_geometry[df_pairs_with_geometry['blocked'] == True]
+    gdf_travel_blocked = gpd.GeoDataFrame(df_pairs_blocked, geometry=df_pairs_blocked['geometry'])
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=(15, 15))
+    gdf_travel.plot(ax=ax, color='blue', label='Travel routes', alpha = 0.02)
+    gdf_travel_blocked.plot(ax=ax, color='yellow', label='Blocked routes', alpha=0.5)
+    gdf_fire.plot(ax=ax, color='red', markersize=100, label='Fire location', alpha=1.0)
+    plt.title(f'Fire and blocked paths for {fire_name}')
+    plt.legend()
+    plt.show()
+
+def process_geojson(file_path):
+    with open(file_path, 'r') as file:
+        geojson = json.load(file)
+    
+    dates = []
+    areas = []
+
+    for feature in geojson['features']:
+        # Extract the acquisition date and convert it to a datetime object
+        date_str = feature['properties']['acq_date']
+        date = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
+        dates.append(date)
+
+        # Calculate the area of the polygon and convert it to square kilometers
+        geom = shape(feature['geometry'])
+        area = geom.area / 1_000_000  # Convert from square meters to square kilometers
+        areas.append(area)
+    
+    return dates, areas
