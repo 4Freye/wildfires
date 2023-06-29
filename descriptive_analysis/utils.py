@@ -52,6 +52,27 @@ def process_pre_fire_data(df, fire_start_date):
 
     return pre_fire_merged
 
+def process_during_fire_data(df, fire_start_date):
+    fire_start_date = datetime.strptime(fire_start_date, '%Y%m%d')
+    fire_pre_date = fire_start_date - timedelta(days=30)  # get 30 days prior to the fire_start_date
+    fire_start_date = fire_start_date.strftime('%Y%m%d')
+    fire_pre_date = fire_pre_date.strftime('%Y%m%d')
+
+    during_fire_df = df.query('date >= @fire_start_date and date < @fire_contained_date')
+    n_days = (during_fire_df['date'].max() - during_fire_df['date'].min()).days
+    during_fire_grouped = during_fire_df.groupby(['geoid_o', 'geoid_d']).agg({'visitor_flows':'sum', 'pop_flows':'sum'})
+    
+    # normalize by the number of days
+    during_fire_grouped = during_fire_grouped.multiply(1/n_days)
+    during_fire_grouped.reset_index(inplace=True)
+    
+    # merge long lat
+    during_fire_merged = during_fire_grouped.merge(df.drop_duplicates(['geoid_o'])[['geoid_o','lat_o','lng_o']], how='left', on='geoid_o')
+    during_fire_merged = during_fire_merged.merge(df.drop_duplicates(['geoid_d'])[['geoid_d','lat_d','lng_d']], how='left', on='geoid_d')
+
+    return during_fire_merged
+
+
 
 def plot_density_map(wildfire_df, fire_name, coords):
     plot = wildfire_df.query('acq_date >= @{}_start_date & acq_date <= @{}_contained_date'.format(fire_name, fire_name))
