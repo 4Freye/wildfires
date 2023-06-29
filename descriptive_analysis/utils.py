@@ -71,7 +71,6 @@ def process_during_fire_data(df, fire_start_date, fire_contained_date):
 
     return during_fire_merged
 
-
 def plot_density_map(wildfire_df, fire_name, coords):
     plot = wildfire_df.query('acq_date >= @{}_start_date & acq_date <= @{}_contained_date'.format(fire_name, fire_name))
     fig = px.density_mapbox(plot, lat='latitude', lon='longitude', z='confidence', radius=2,
